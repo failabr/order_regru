@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.sqlite3
+
+# Django
+/media/
+.env
+
+# Node (React frontend)
+node_modules/
+frontend/build/
+
+# VS Code
+.vscode/
+
+# System
+.DS_Store
+*.log
