@@ -142,7 +142,7 @@ USE_TZ = True
 STATIC_URL = '/backend_static/'
 
 STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, 'frontend', 'build', 'static'),  # React static
+    os.path.join(BASE_DIR, '..', 'frontend', 'build', 'static'),  # <-- шаг вверх
 ]
 
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')  # сюда попадёт админка после collectstatic

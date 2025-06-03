@@ -1,7 +1,7 @@
 # ✅ SERIALIZERS.PY
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import Organization, UserProfile, Order, OrderAttachment
+from .models import Organization, UserProfile, Order, OrderAttachment, FurnitureType
 from .models import ContactMessage
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -81,3 +81,10 @@ class ContactMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ContactMessage
         fields = '__all__'
+
+class FurnitureTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FurnitureType
+        fields = ['id', 'name', 'description', 'base_labor_cost', 'complexity_factor', 'organization', 'purchased', 'excel_file']
+        read_only_fields = ['organization']
+

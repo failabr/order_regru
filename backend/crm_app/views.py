@@ -1,8 +1,8 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework import viewsets, permissions
-from .models import Order, UserProfile, OrderAttachment, Organization
-from .serializers import OrderSerializer, OrderAttachmentSerializer
+from .models import Order, UserProfile, OrderAttachment, Organization, FurnitureType
+from .serializers import OrderSerializer, OrderAttachmentSerializer, FurnitureTypeSerializer
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.response import Response
@@ -10,7 +10,7 @@ from datetime import timedelta, datetime
 from django.http import FileResponse, Http404
 import os
 from django.conf import settings
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, unquote
 from django.utils.timezone import now
 from django.db.utils import IntegrityError
 from django.views.decorators.csrf import csrf_exempt
@@ -34,11 +34,18 @@ from rest_framework.authtoken.models import Token
 from django.core.mail import send_mail
 from django.conf import settings
 from rest_framework.decorators import api_view, parser_classes, permission_classes
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from rest_framework import status
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.decorators import action
 from django.core.mail import EmailMessage
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import InMemoryUploadedFile
+from django.utils.encoding import force_str
+from django.utils.http import urlsafe_base64_decode
+from django.core.files.base import ContentFile
 
+from urllib.parse import urlparse, unquote
+import logging
 
 
 
@@ -59,26 +66,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
     permission_classes = [permissions.IsAuthenticated]
-
-
-    def create(self, request, *args, **kwargs):
-        user = request.user
-        user_profile = UserProfile.objects.get(user=user)
-        serializer = self.get_serializer(data=request.data, context={"request": request})
-        if not serializer.is_valid():
-            logger.warning("❌ Ошибки сериализатора: %s", serializer.errors)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        user = request.user
-        user_profile = UserProfile.objects.get(user=user)
-        if user_profile.role != 'owner':
-            serializer.validated_data.pop('assigned_to', None)
-
-        if user_profile.role != 'owner':
-            serializer.validated_data.pop('assigned_to', None)
-        self.perform_create(serializer)
-        return Response(OrderSerializer(serializer.instance).data, status=status.HTTP_201_CREATED)
-
+    parser_classes = [MultiPartParser, FormParser]
 
     def get_queryset(self):
         """Возвращаем заказы в зависимости от роли пользователя в организации с логированием"""
@@ -116,8 +104,21 @@ class OrderViewSet(viewsets.ModelViewSet):
             orders = Order.objects.filter(created_by=user)
             logger.info(f"Индивидуал {user.username}; заказов: {orders.count()}")
             return orders
-        
-        
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+        user_profile = UserProfile.objects.get(user=user)
+        serializer = self.get_serializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            logger.warning("❌ Ошибки сериализатора: %s", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        if user_profile.role != 'owner':
+            serializer.validated_data.pop('assigned_to', None)
+
+        self.perform_create(serializer)
+        return Response(OrderSerializer(serializer.instance).data, status=status.HTTP_201_CREATED)
+
     def perform_create(self, serializer):
         user = self.request.user
         user_profile = UserProfile.objects.get(user=user)
@@ -136,13 +137,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         for file in files:
             OrderAttachment.objects.create(order=order, file=file)
 
-
     def perform_update(self, serializer):
-        user = self.request.user
-        user_profile = UserProfile.objects.get(user=user)
-
-        if user_profile.role != 'owner':
-            serializer.validated_data.pop('assigned_to', None)
         user = self.request.user
         user_profile = UserProfile.objects.get(user=user)
 
@@ -158,7 +153,52 @@ class OrderViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 logger.error(f"Ошибка при сохранении файла {file.name}: {e}", exc_info=True)
 
+    @action(detail=False, methods=['post'], url_path='update-furniture')
+    @action(detail=False, methods=["post"], url_path="update-furniture")
+    def update_furniture(self, request):
+        """Обновление файла фурнитуры для заказа"""
+        logger.info("📥 Получен запрос на обновление файла фурнитуры")
+        
+        try:
+            if 'file' not in request.FILES:
+                logger.error("❌ Файл не предоставлен в запросе")
+                return Response({'error': 'Файл не предоставлен'}, status=status.HTTP_400_BAD_REQUEST)
 
+            order_number = request.data.get('order_number')
+            original_file_url = request.data.get('original_file_url')
+
+            if not order_number or not original_file_url:
+                logger.error("❌ Не указан номер заказа или URL оригинального файла")
+                return Response({'error': 'Не указан номер заказа или URL оригинального файла'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Правильно извлекаем путь из URL
+            parsed = urlparse(original_file_url)
+            file_path = parsed.path.replace('/media/', '')  # Удаляет только /media/, а не attachments
+            file_path = unquote(file_path)
+
+            if not default_storage.exists(file_path):
+                logger.error(f"❌ Оригинальный файл не найден: {file_path}")
+                return Response({'error': 'Оригинальный файл не найден'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Заменяем содержимое файла новым
+            new_file = request.FILES['file']
+            logger.info(f"💾 Перезаписываем файл: {file_path}")
+            default_storage.delete(file_path)
+            default_storage.save(file_path, ContentFile(new_file.read()))
+            logger.info(f"✅ Файл успешно обновлён: {file_path}")
+
+            return Response({
+                'success': True,
+                'message': 'Файл успешно обновлён',
+                'file_path': file_path
+            })
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при сохранении файла: {str(e)}", exc_info=True)
+            return Response({
+                'success': False,
+                'message': f'Ошибка при сохранении файла: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class OrderAttachmentViewSet(viewsets.ModelViewSet):
     queryset = OrderAttachment.objects.all()
@@ -176,6 +216,7 @@ def register_user(request):
     email = request.data.get("email")
     password = request.data.get("password")
     confirm_password = request.data.get("confirm_password")
+    recaptcha_token = request.data.get("recaptcha")
 
     if not username or not email or not password or not confirm_password:
         return Response({"error": "Заполните все поля"}, status=status.HTTP_400_BAD_REQUEST)
@@ -191,6 +232,17 @@ def register_user(request):
 
     if User.objects.filter(email=email).exists():
         return Response({"error": "Этот email уже зарегистрирован"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Проверка reCAPTCHA только если не в режиме разработки
+    if not settings.DEBUG or recaptcha_token != 'development_mode':
+        recaptcha_secret = settings.RECAPTCHA_PRIVATE_KEY
+        recaptcha_response = requests.post(
+            "https://www.google.com/recaptcha/api/siteverify",
+            data={"secret": recaptcha_secret, "response": recaptcha_token}
+        )
+        recaptcha_result = recaptcha_response.json()
+        if not recaptcha_result.get("success"):
+            return Response({"error": "Ошибка reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
 
     # ⛔ Создаём неактивного пользователя
     user = User.objects.create_user(username=username, email=email, password=password)
@@ -257,52 +309,47 @@ def login_view(request):
 
     logger.info(f"Попытка входа: {username}")
 
-
     # Проверка наличия всех необходимых данных
     if not all([username, password, recaptcha_token]):
         return Response({"error": "Все поля обязательны."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Проверка Google reCAPTCHA
-    recaptcha_secret = settings.RECAPTCHA_PRIVATE_KEY
-    recaptcha_response = requests.post(
-        "https://www.google.com/recaptcha/api/siteverify",
-        data={"secret": recaptcha_secret, "response": recaptcha_token}
-    )
-    recaptcha_result = recaptcha_response.json()
-    if not recaptcha_result.get("success"):
-        return Response({"error": "Ошибка reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
+    # Проверка Google reCAPTCHA только если не в режиме разработки
+    if not settings.DEBUG or recaptcha_token != 'development_mode':
+        recaptcha_secret = settings.RECAPTCHA_PRIVATE_KEY
+        recaptcha_response = requests.post(
+            "https://www.google.com/recaptcha/api/siteverify",
+            data={"secret": recaptcha_secret, "response": recaptcha_token}
+        )
+        recaptcha_result = recaptcha_response.json()
+        if not recaptcha_result.get("success"):
+            return Response({"error": "Ошибка reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
     
     logger.info(f"прошла капча")
 
     # Аутентификация пользователя
-    user = User.objects.get(username=username)
-    if not user:
-        logger.warning(f"1Неудачная попытка входа для пользователя: {username}")
-        return Response({"non_field_errors": ["1Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
-
     try:
-        user_obj = User.objects.get(username=username)
+        user = User.objects.get(username=username)
     except User.DoesNotExist:
-        logger.warning(f"2Неудачная попытка входа для пользователя: {username} (пользователь не найден)")
-        return Response({"non_field_errors": ["2Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
+        logger.warning(f"Неудачная попытка входа для пользователя: {username} (пользователь не найден)")
+        return Response({"non_field_errors": ["Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
 
     # Проверяем пароль
-    if not user_obj.check_password(password):
-        logger.warning(f"3Неудачная попытка входа для пользователя: {username} (неверный пароль)")
-        return Response({"non_field_errors": ["3Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
+    if not user.check_password(password):
+        logger.warning(f"Неудачная попытка входа для пользователя: {username} (неверный пароль)")
+        return Response({"non_field_errors": ["Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
 
     # Теперь данные корректны, проверяем активацию
-    if not user_obj.is_active:
+    if not user.is_active:
         logger.warning(f"Аккаунт не активирован: {username}")
         return Response({
             "error": "Аккаунт не активирован.",
             "resend": True,
-            "username": user_obj.username,
-            "email": user_obj.email
+            "username": user.username,
+            "email": user.email
         }, status=status.HTTP_403_FORBIDDEN)
 
     # Если всё хорошо, создаём токен и возвращаем его
-    token, _ = Token.objects.get_or_create(user=user_obj)
+    token, _ = Token.objects.get_or_create(user=user)
     return Response({"token": token.key}, status=status.HTTP_200_OK)
 
 
@@ -619,9 +666,31 @@ def contact_message(request):
     except Exception as e:
         return Response({"error": f"Ошибка при отправке письма: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+class FurnitureTypeViewSet(viewsets.ModelViewSet):
+    serializer_class = FurnitureTypeSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
+    def get_queryset(self):
+        user_profile = self.request.user.userprofile
+        return FurnitureType.objects.filter(organization=user_profile.organization)
 
-from django.views.generic import TemplateView
+    def perform_create(self, serializer):
+        serializer.save(organization=self.request.user.userprofile.organization)
 
-class FrontendAppView(TemplateView):
-    template_name = 'index.html'
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        # Сохраняем старый файл, если новый не предоставлен
+        if 'excel_file' not in self.request.FILES and instance.excel_file:
+            serializer.validated_data['excel_file'] = instance.excel_file
+        serializer.save()
+
+    @action(detail=True, methods=['PATCH'])
+    def toggle_purchased(self, request, pk=None):
+        furniture = self.get_object()
+        furniture.purchased = not furniture.purchased
+        furniture.save()
+        return Response({
+            'id': furniture.id,
+            'purchased': furniture.purchased
+        })

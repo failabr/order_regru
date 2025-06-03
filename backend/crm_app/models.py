@@ -169,3 +169,15 @@ class ContactMessage(models.Model):
 
     def __str__(self):
         return f"{self.subject} от {self.email}"
+
+class FurnitureType(models.Model):
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    base_labor_cost = models.DecimalField(max_digits=10, decimal_places=2)
+    complexity_factor = models.DecimalField(max_digits=3, decimal_places=2, default=1.00)
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='furniture_types')
+    purchased = models.BooleanField(default=False, verbose_name='Куплено')
+    excel_file = models.FileField(upload_to='furniture_files/', null=True, blank=True)
+
+    def __str__(self):
+        return self.name
