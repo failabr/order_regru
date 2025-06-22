@@ -302,43 +302,51 @@ def activate_user(request, uidb64, token):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
-    """🔐 Вход с проверкой Google reCAPTCHA v2 и проверкой активации"""
+    """🔐 Вход с reCAPTCHA для веба и без неё для мобильных приложений"""
     username = request.data.get("username")
     password = request.data.get("password")
     recaptcha_token = request.data.get("recaptcha")
 
     logger.info(f"Попытка входа: {username}")
 
-    # Проверка наличия всех необходимых данных
-    if not all([username, password, recaptcha_token]):
+    if not all([username, password]):
         return Response({"error": "Все поля обязательны."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Проверка Google reCAPTCHA только если не в режиме разработки
-    if not settings.DEBUG or recaptcha_token != 'development_mode':
-        recaptcha_secret = settings.RECAPTCHA_PRIVATE_KEY
-        recaptcha_response = requests.post(
-            "https://www.google.com/recaptcha/api/siteverify",
-            data={"secret": recaptcha_secret, "response": recaptcha_token}
-        )
-        recaptcha_result = recaptcha_response.json()
-        if not recaptcha_result.get("success"):
-            return Response({"error": "Ошибка reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
-    
-    logger.info(f"прошла капча")
+    # 🔍 Определим, что это мобильное приложение
+    user_agent = request.headers.get('User-Agent', '').lower()
+    is_mobile_client = 'reactnative' in user_agent or 'okhttp' in user_agent or 'ordioapp' in user_agent \
+                   or recaptcha_token == 'skip_for_mobile'
 
-    # Аутентификация пользователя
+    # ✅ Проверка reCAPTCHA для веба (если не в режиме mobile или dev)
+    if not is_mobile_client:
+        if not recaptcha_token:
+            return Response({"error": "Отсутствует токен reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
+
+        recaptcha_secret = settings.RECAPTCHA_PRIVATE_KEY
+        try:
+            recaptcha_response = requests.post(
+                "https://www.google.com/recaptcha/api/siteverify",
+                data={"secret": recaptcha_secret, "response": recaptcha_token}
+            )
+            recaptcha_result = recaptcha_response.json()
+            if not recaptcha_result.get("success"):
+                logger.warning("Ошибка проверки reCAPTCHA")
+                return Response({"error": "Ошибка reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
+        except requests.RequestException as e:
+            logger.error(f"Ошибка подключения к Google reCAPTCHA: {e}")
+            return Response({"error": "Ошибка проверки reCAPTCHA."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # 🔐 Аутентификация
     try:
         user = User.objects.get(username=username)
     except User.DoesNotExist:
-        logger.warning(f"Неудачная попытка входа для пользователя: {username} (пользователь не найден)")
+        logger.warning(f"Пользователь не найден: {username}")
         return Response({"non_field_errors": ["Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Проверяем пароль
     if not user.check_password(password):
-        logger.warning(f"Неудачная попытка входа для пользователя: {username} (неверный пароль)")
+        logger.warning(f"Неверный пароль для пользователя: {username}")
         return Response({"non_field_errors": ["Неверный логин или пароль"]}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Теперь данные корректны, проверяем активацию
     if not user.is_active:
         logger.warning(f"Аккаунт не активирован: {username}")
         return Response({
@@ -348,10 +356,10 @@ def login_view(request):
             "email": user.email
         }, status=status.HTTP_403_FORBIDDEN)
 
-    # Если всё хорошо, создаём токен и возвращаем его
+    # 🎫 Токен
     token, _ = Token.objects.get_or_create(user=user)
+    logger.info(f"Успешный вход: {username}")
     return Response({"token": token.key}, status=status.HTTP_200_OK)
-
 
 
 @api_view(["POST"])

@@ -13,6 +13,9 @@ node_modules/
 # VS Code
 .vscode/
 
+
+/backend/media/
+
 # System
 .DS_Store
 *.log
