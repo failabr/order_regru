@@ -181,3 +181,16 @@ class FurnitureType(models.Model):
 
     def __str__(self):
         return self.name
+
+
+
+from django.contrib.auth.models import User
+
+class OrderOwner(User):
+    """Прокси-модель для отображения пользователей с заказами в админке."""
+    class Meta:
+        proxy = True
+        verbose_name = "Пользователь с заказами"
+        verbose_name_plural = "Заказы"  # так будет называться пункт в меню
+        # app_label можно не задавать; если хочешь видеть в блоке crm_app:
+        # app_label = "crm_app"

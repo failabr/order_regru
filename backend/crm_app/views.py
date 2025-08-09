@@ -495,16 +495,39 @@ def leave_organization(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def user_info(request):
-    """✅ Получить данные текущего пользователя"""
+    """✅ Получить данные текущего пользователя + список коллег по организации"""
+    # 1. Берём профиль и организацию
     profile = UserProfile.objects.get(user=request.user)
+    org = profile.organization
 
-    return Response({
-        "username": profile.user.username,
-        "organization": profile.organization.name if profile.organization else "Нет",
-        "organization_code": profile.organization.code if profile.organization else None,
-        "role": profile.role,
-        "role_display": profile.get_role_display(),
-    })
+    # 2. Собираем базовый блок ответа
+    data = {
+        "username":          profile.user.username,
+        "organization":      org.name            if org else None,
+        "organization_code": org.code            if org else None,
+        "role":              profile.role,
+        "role_display":      profile.get_role_display(),
+    }
+
+    # 3. Если у пользователя есть организация, делаем members
+    if org:
+        members_qs = User.objects.filter(
+            userprofile__organization=org
+        ).select_related("userprofile")
+        
+        members = []
+        for u in members_qs:
+            members.append({
+                "id":            u.id,
+                "username":      u.username,
+                "role":          u.userprofile.role,
+                "role_display":  u.userprofile.get_role_display(),
+            })
+        data["members"] = members
+    else:
+        data["members"] = []
+
+    return Response(data)
 
 @api_view(["GET"])
 def download_attachment(request, file_path):
