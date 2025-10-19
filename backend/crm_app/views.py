@@ -69,41 +69,73 @@ class OrderViewSet(viewsets.ModelViewSet):
     parser_classes = [MultiPartParser, FormParser]
 
     def get_queryset(self):
-        """Возвращаем заказы в зависимости от роли пользователя в организации с логированием"""
+        """Возвращаем заказы в зависимости от роли пользователя в организации + поиск без учёта регистра"""
         if not self.request.user.is_authenticated:
-            logger.info("Пользователь не аутентифицирован, возвращаем пустой QuerySet")
             return Order.objects.none()
 
         user = self.request.user
         user_profile = UserProfile.objects.filter(user=user).first()
-        logger.info(f"Профиль пользователя: {user_profile}")
-        if user_profile:
-            logger.info(f"Найден профиль для пользователя {user.username}: {user_profile}")
-        else:
-            logger.info(f"Профиль для пользователя {user.username} не найден")
 
+        # ===== Базовый набор заказов по роли =====
         if user_profile and user_profile.organization:
-            logger.info(f"Пользователь {user.username} состоит в организации: {user_profile.organization}")
             if user_profile.role == 'owner':
-                # Владелец — видит все заказы компании и свои личные
-                orders = Order.objects.filter(
+                queryset = Order.objects.filter(
                     Q(organization=user_profile.organization) |
                     Q(created_by=user)
                 ).distinct()
-                logger.info(f"Владелец {user.username}; найдено заказов: {orders.count()}")
-                return orders
             else:
-                # Менеджер — видит свои и назначенные ему заказы
-                orders = Order.objects.filter(
+                queryset = Order.objects.filter(
                     Q(created_by=user) | Q(assigned_to=user)
                 ).distinct()
-                logger.info(f"Менеджер {user.username}; найдено заказов: {orders.count()}")
-                return orders
         else:
-            # Пользователь без компании — видит только свои заказы
-            orders = Order.objects.filter(created_by=user)
-            logger.info(f"Индивидуал {user.username}; заказов: {orders.count()}")
-            return orders
+            queryset = Order.objects.filter(created_by=user)
+
+        # ===== Поиск без учёта регистра =====
+        from django.db.models.functions import Lower
+
+        search = self.request.query_params.get('search')
+        if search:
+            search = search.lower()
+            queryset = queryset.annotate(
+                full_name_lower=Lower('full_name'),
+                address_lower=Lower('address'),
+                phone_lower=Lower('phone_number')
+            ).filter(
+                Q(full_name_lower__contains=search) |
+                Q(address_lower__contains=search) |
+                Q(phone_lower__contains=search)
+            )
+
+        # ===== Сортировка =====
+        from django.db.models import F, Max, Case, When, IntegerField  # F добавили
+
+        sort_param = self.request.query_params.get('sort')
+
+        if sort_param == "files_desc":
+            queryset = queryset.annotate(last_file_date=Max('attachments__created_at')) \
+                            .order_by(F('last_file_date').desc(nulls_last=True), F('received_date').desc(nulls_last=True), '-id')
+
+        elif sort_param == "order_desc":
+            # Новые сверху по дате приёма
+            queryset = queryset.order_by(F('received_date').desc(nulls_last=True), '-id')
+
+        elif sort_param == "order_asc":
+            # Старые сверху по дате приёма
+            queryset = queryset.order_by(F('received_date').asc(nulls_last=True), 'id')
+
+        elif sort_param == "reclamations":
+            # Сначала рекламации, внутри — новые сверху по дате приёма
+            queryset = queryset.order_by(
+                Case(When(status='reclamation', then=0), default=1, output_field=IntegerField()),
+                F('received_date').desc(nulls_last=True),
+                '-id'
+            )
+
+        else:
+            # Дефолт: новые сверху по дате приёма
+            queryset = queryset.order_by(F('received_date').desc(nulls_last=True), '-id')
+
+        return queryset
 
     def create(self, request, *args, **kwargs):
         user = request.user
@@ -152,6 +184,80 @@ class OrderViewSet(viewsets.ModelViewSet):
                 OrderAttachment.objects.create(order=order, file=file)
             except Exception as e:
                 logger.error(f"Ошибка при сохранении файла {file.name}: {e}", exc_info=True)
+
+
+
+
+    # ===========================
+#   СПИСОК ПОКУПОК (actions)
+# ===========================
+
+from rest_framework.parsers import JSONParser  # убедись, что импорт есть сверху
+
+@action(
+    detail=True,
+    methods=["GET", "POST"],
+    url_path="purchase-items",
+    permission_classes=[IsAuthenticated],
+    parser_classes=[JSONParser, FormParser, MultiPartParser],
+)
+def purchase_items(self, request, pk=None):
+    """
+    GET: вернуть позиции активного списка покупок для заказа pk
+         ?purchased=true|false — фильтр
+         ?search=... — поиск по name/note
+         ?page=1&page_size=100 — пагинация
+    POST: добавить позицию (name, qty, unit, unit_price, note)
+    """
+    # 1) Находим заказ и проверяем доступ
+    order = self.get_object()
+    _require_order_access(request.user, order)
+
+    # 2) Берём (или создаём) активный список
+    pl = _get_active_list(order, request.user, create_if_missing=True)
+
+    if request.method == "GET":
+        qs = PurchaseItem.objects.filter(purchase_list=pl)
+
+        purchased = request.query_params.get("purchased")
+        if purchased in ("true", "false"):
+            qs = qs.filter(is_purchased=(purchased == "true"))
+
+        search = request.query_params.get("search")
+        if search:
+            qs = qs.filter(Q(name__icontains=search) | Q(note__icontains=search))
+
+        # простая пагинация
+        try:
+            page = int(request.query_params.get("page", 1))
+        except ValueError:
+            page = 1
+        try:
+            page_size = int(request.query_params.get("page_size", 100))
+        except ValueError:
+            page_size = 100
+
+        start, end = (page - 1) * page_size, page * page_size
+        total = qs.count()
+        items = qs.order_by("name")[start:end]
+
+        ser = PurchaseItemSerializer(items, many=True)
+        return Response({
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "results": ser.data,
+        })
+
+    # POST — добавить новую позицию
+    data = request.data.copy()
+    data["purchase_list"] = pl.id
+    ser = PurchaseItemSerializer(data=data)
+    if not ser.is_valid():
+        return Response(ser.errors, status=400)
+    item = ser.save()
+    return Response(PurchaseItemSerializer(item).data, status=201)
+
 
     @action(detail=False, methods=['post'], url_path='update-furniture')
     @action(detail=False, methods=["post"], url_path="update-furniture")
