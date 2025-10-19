@@ -1,21 +1,49 @@
-# Python cache
+# ---------- Python ----------
 __pycache__/
 *.py[cod]
-*.sqlite3
-
-# Django
-/media/
-.env
-
-# Node (React frontend)
-node_modules/
-
-# VS Code
-.vscode/
-
-
-/backend/media/
-
-# System
-.DS_Store
+*.pyo
+*.egg-info/
 *.log
+*.sqlite3
+*.db
+.python-version            # pyenv
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Локальные виртуальные окружения
+venv/
+.venv/
+
+# ---------- Django ----------
+/media/                    # если медиа грузятся пользователями — не в гит
+/backend/media/            # дубль на случай монорепы
+/staticfiles/              # результирующая папка collectstatic (если используете)
+*.pot                      # локализация (опционально)
+# .env-файлы
+.env
+.env.*                     # .env.local, .env.prod, и т.д. (не путать с env.example)
+
+# ---------- Node / React ----------
+node_modules/
+frontend/build/            # артефакт сборки CRA/Vite/Next static export
+*.tsbuildinfo
+# логи/кеши
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.cache/
+.vite/
+.next/
+dist/
+
+# ---------- IDE/Editor ----------
+.vscode/
+.idea/
+*.iml
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
